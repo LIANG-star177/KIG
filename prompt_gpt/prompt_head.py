@@ -14,6 +14,7 @@ from transformers import BertTokenizer
 
 from prompt_encoder import PromptEncoder
 from model import GPT2LMHeadModel
+# from transformers import GPT2LMHeadModel
 
 import torch
 import torch.nn as nn
@@ -209,28 +210,29 @@ class CaPromptHead(torch.nn.Module):
     
 
     def forward(self, input_ids=None, past=None, token_type_ids=None, labels=None, title_id=None, claim_label2 = None):
+        self.eval()
         batch_size, max_seq_len = input_ids.size()
-        prompt_tokens = [self.pseudo_token_id]
-        queries = self.get_query_head(input_ids, prompt_tokens)
-
         # mask
         att_mask = self.get_att_mask(input_ids)
-        attention_mask = torch.cat([torch.ones([att_mask.shape[0], self.spell_length]).long().to(self.args.device), att_mask], dim=1)
-        
-        # token_type_ids
-        content_id = self.tokenizer.convert_tokens_to_ids("[Content]")
-        prompt_type_ids = torch.LongTensor([[content_id]*self.spell_length for _ in range(att_mask.shape[0])])
-        token_type_ids = torch.cat([prompt_type_ids.to(self.args.device), token_type_ids], dim=1)
 
-        # position_ids
-        position_ids = attention_mask.long().cumsum(-1)- 1
-        position_ids.masked_fill_(attention_mask == 0, 0)
+        labels = torch.clone(input_ids)
+        labels.masked_fill_(att_mask==0, -100)
 
-        context_attn_mask = attention_mask.clone()
-        context_encoding = self.model.transformer(queries, None, context_attn_mask)
+        position_ids = att_mask.long().cumsum(-1)- 1
+        position_ids.masked_fill_(att_mask == 0, 0)
+
+        context_attn_mask = att_mask.clone()
+        context_attn_mask[labels>0]=0
+        context_encoding = self.model.transformer(input_ids, None, context_attn_mask)
         past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
 
         prefix_attn = torch.ones(batch_size, self.spell_length).long().to(self.args.device)
-        attention_mask = torch.cat((prefix_attn, attention_mask), 1)
+        attention_mask = torch.cat((prefix_attn, att_mask), 1)
+
+        # transformer_outputs = self.model.transformer(input_ids, past_key_values =past_key_values_prompt, attention_mask=context_attn_mask)
+        # hidden_states = transformer_outputs[0]
+        # lm_logits = self.model.lm_head(hidden_states)
+        # outputs = (lm_logits,) + transformer_outputs[1:]
+        # past_key_values_prompt = outputs.past_key_values
         
-        return queries, past_key_values_prompt, attention_mask, position_ids, token_type_ids  
+        return input_ids, past_key_values_prompt, attention_mask, position_ids, token_type_ids  

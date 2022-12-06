@@ -22,6 +22,8 @@ class CaPromptEncoder(torch.nn.Module):
         self.config.vocab_size = template_len
         self.config.n_positions = template_len
         self.config.n_ctx = template_len
+        self.config.n_head = 12
+        self.config.n_layer = 3
         self.config.add_cross_attention=True
         self.transformer = GPT2Model(self.config)
         self.transformer = self.transformer.to(self.args.device)
@@ -63,7 +65,14 @@ class Distill_Tuning(nn.Module):
         
     
         print(f"number of basic parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
-        self.prompt_encoder = CaPromptEncoder(self.spell_length,  self.embeddings, self.args)
+        if self.args.multi_prompt:
+            self.prompt_encoder = []
+            for i in range(5):
+                self.prompt_encoder.append(CaPromptEncoder(self.spell_length, self.embeddings, args))
+            self.prompt_encoder = nn.ModuleList(self.prompt_encoder).to(self.args.device)
+        else:
+            self.prompt_encoder = CaPromptEncoder(self.spell_length, self.embeddings, args)
+        # self.prompt_encoder = CaPromptEncoder(self.spell_length,  self.embeddings, self.args)
         print(f"number of additional parameters: {sum(p.numel() for p in self.prompt_encoder.parameters() if p.requires_grad)}")
         
     def init_weights(self, m):# Initialize Linear Weight for GAN
@@ -107,30 +116,63 @@ class Distill_Tuning(nn.Module):
     def forward(self, input_ids=None, past=None, token_type_ids=None, labels=None, title_id=None, claim_label2 = None):
         self.train()
         batch_size, max_seq_len = input_ids.size()
-        prompt_tokens = [self.pseudo_token_id]
-        queries = self.get_query_head(input_ids, prompt_tokens)
+        # prompt_tokens = [self.pseudo_token_id]
+        # queries = self.get_query_head(input_ids, prompt_tokens)
 
         # mask
         att_mask = self.get_att_mask(input_ids)
-        attention_mask = torch.cat([torch.ones([att_mask.shape[0], self.spell_length]).long().to(self.args.device), att_mask], dim=1)
-        
-        # token_type_ids
-        content_id = self.tokenizer.convert_tokens_to_ids("[Content]")
-        prompt_type_ids = torch.LongTensor([[content_id]*self.spell_length for _ in range(att_mask.shape[0])])
-        token_type_ids = torch.cat([prompt_type_ids.to(self.args.device), token_type_ids], dim=1)
 
-        # position_ids
-        position_ids = attention_mask.long().cumsum(-1)- 1
-        position_ids.masked_fill_(attention_mask == 0, 0)
+        labels = torch.clone(input_ids)
+        labels.masked_fill_(att_mask==0, -100)
 
-        context_attn_mask = attention_mask.clone()
-        context_encoding = self.model.transformer(queries, None, context_attn_mask)
-        past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
+        position_ids = att_mask.long().cumsum(-1)- 1
+        position_ids.masked_fill_(att_mask == 0, 0)
+
+        context_attn_mask = att_mask.clone()
+        context_attn_mask[labels>0]=0
+        context_encoding = self.model.transformer(input_ids, None, context_attn_mask)
+        if self.args.multi_prompt:
+            past_key_values_all = []
+            for i, prompt_enc in enumerate(self.prompt_encoder):
+                past_key_values_all.append(prompt_enc(context_encoding[0], context_attn_mask))
+            past_key_values_all = torch.stack(past_key_values_all, dim=0)
+            mask = claim_label2
+            past_key_values_prompt = torch.sum(past_key_values_all * mask, dim=-1)
+        else:
+            past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
 
         prefix_attn = torch.ones(batch_size, self.spell_length).long().to(self.args.device)
-        attention_mask = torch.cat((prefix_attn, attention_mask), 1)
+        attention_mask = torch.cat((prefix_attn, att_mask), 1)
 
-        transformer_outputs = self.model.transformer(input_ids=queries,
+
+        # attention_mask = torch.cat([torch.ones([att_mask.shape[0], self.spell_length]).long().to(self.args.device), att_mask], dim=1)
+        
+        # token_type_ids
+        # content_id = self.tokenizer.convert_tokens_to_ids("[Content]")
+        # prompt_type_ids = torch.LongTensor([[content_id]*self.spell_length for _ in range(att_mask.shape[0])])
+        # token_type_ids = torch.cat([prompt_type_ids.to(self.args.device), token_type_ids], dim=1)
+
+        # # position_ids
+        # position_ids = attention_mask.long().cumsum(-1)- 1
+        # position_ids.masked_fill_(attention_mask == 0, 0)
+
+        # labels = torch.clone(input_ids)
+        # labels.masked_fill_(attention_mask==0, -100)
+
+        # context_attn_mask = att_mask.clone()
+        # context_attn_mask[labels>0]=0
+        # context_encoding = self.model.transformer(input_ids, None, context_attn_mask)
+        # past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
+
+        # labels = torch.clone(queries)
+        # labels.masked_fill_(attention_mask==0, -100)
+        # labels.masked_fill_(queries == self.pseudo_token_id, -100)
+
+        # prefix_attn = torch.ones(batch_size, self.spell_length).long().to(self.args.device)
+        # attention_mask = torch.cat((prefix_attn, attention_mask), 1)
+
+        
+        transformer_outputs = self.model.transformer(input_ids=input_ids,
                 past_key_values = past_key_values_prompt,
                 attention_mask=attention_mask,
                 position_ids=position_ids, 
@@ -143,7 +185,7 @@ class Distill_Tuning(nn.Module):
             if title_id is None or token_type_ids is None:
                 raise Exception("当labels不为None时， title_id和token_type_ids均不可以为None。")
             mask = (token_type_ids == title_id).long()
-            labels = queries * mask
+            labels = labels * mask
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 

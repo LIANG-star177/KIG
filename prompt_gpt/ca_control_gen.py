@@ -24,7 +24,7 @@ import json
 from tqdm import tqdm
 from nltk.translate.bleu_score import sentence_bleu
 from rouge import Rouge
-from distill_tuning import Distill_Tuning
+from dialog_tuning import Distill_Tuning
 from disc_judge import cal_ans
 from Transformer_sent_model import Transformer
 from mytokenizer import MyTokenizer
@@ -36,7 +36,7 @@ def set_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='0', type=str, help='设置预测时使用的显卡,使用CPU设置成-1即可')
     parser.add_argument('--pretrained_model_path', default="log/checkpoint-41680", type=str, help='预训练的GPT2模型的路径')
-    parser.add_argument('--prompt_model_path', default='log/multi_prompt_saved_model/checkpoint-2084', type=str, help='模型输出路径')
+    parser.add_argument('--prompt_model_path', default='log/ca_prompt_saved_model/checkpoint-20840', type=str, help='模型输出路径')
     parser.add_argument('--vocab_path', default='new_gpt/vocab.txt', type=str, help='词表，该词表为小词表，并增加了一些新的标记')
     parser.add_argument('--batch_size', default=1, type=int, help='生成标题的个数')
     parser.add_argument('--generate_max_len', default=300, type=int, help='生成标题的最大长度')
@@ -53,10 +53,10 @@ def set_args():
     parser.add_argument('--claim_map_path', default="data/claim_l2i_multi.json", type=str)
 
     # prompt参数
-    parser.add_argument("--multi_prompt", type=bool, default=True, help='是否多维prompt')
+    parser.add_argument("--multi_prompt", type=bool, default=False, help='是否多维prompt')
     parser.add_argument("--context_aware", type=bool, default=True, help='是否注意上下文')
     parser.add_argument("--use_lm_finetune", type=bool, default=False, help='是否finetune')
-    parser.add_argument('--template_len', default=10, type=int, required=False,help='prompt长度')
+    parser.add_argument('--template_len', default=5, type=int, required=False,help='prompt长度')
     parser.add_argument("--pseudo_token", type=str, default='##🔥')
     parser.add_argument("--lstm_dropout", type=float, default=0.0)
  
@@ -159,13 +159,13 @@ def predict_one_sample(model, prompt_head, tokenizer, device, args, content, cla
     # 用于存放，完成解码序列的序号
     finish_set = set()
 
-    queries, past_key_values_prompt, attention_mask, position_ids, token_type_ids = prompt_head(input_ids=input_tensors, \
+    input_ids, past_key_values_prompt, attention_mask, position_ids, token_type_ids = prompt_head(input_ids=input_tensors, \
                                                                     token_type_ids=token_type_tensors, claim_label2 = claim_label2)
     with torch.no_grad():
         # 遍历生成标题最大长度
         for _ in range(args.generate_max_len):
 
-            transformer_outputs = model.model.transformer(input_ids=queries,
+            transformer_outputs = model.model.transformer(input_ids=input_ids,
                 past_key_values = past_key_values_prompt,
                 attention_mask=attention_mask,
                 position_ids=position_ids, 
@@ -203,9 +203,9 @@ def predict_one_sample(model, prompt_head, tokenizer, device, args, content, cla
             generated.append([token.item() for token in next_tokens[:, 0]])
             # 将预测结果拼接到input_tensors和token_type_tensors上，继续下一次预测
             
-            queries = torch.cat([queries, next_tokens], dim=1)
+            input_ids = torch.cat([input_ids, next_tokens], dim=1)
             attention_mask = torch.cat((attention_mask, next_attention_mask), dim=-1)
-            next_pos_ids = torch.tensor([[queries.shape[1]]]).long().to(device)
+            next_pos_ids = torch.tensor([[input_ids.shape[1]]]).long().to(device)
             position_ids = torch.cat((position_ids, next_pos_ids), dim=-1)
             token_type_ids = torch.cat((token_type_ids, next_token_type), dim=-1)
         # 用于存储预测结果
