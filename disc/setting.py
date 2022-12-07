@@ -13,7 +13,7 @@ PRE_MODEL = "electra"
 MODEL = "lstm"
 
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 EMB_DIM = 256
 HID_DIM = 256 if PRETRAIN else 256
 SEQ_LEN = {"fact": 300, "claim":300, "view": 300}
