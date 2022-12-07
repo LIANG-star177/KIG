@@ -233,9 +233,10 @@ class CaPromptHead(torch.nn.Module):
                     replace_embeds[k].append(past_key_values_tmp[k])
             past_key_values_total = []
             for i in range(batch_size):
-                mask = claim_label2[i]
+                mask = torch.LongTensor(claim_label2).to(self.args.device)
                 replace_embeds[i] = torch.stack(replace_embeds[i], dim=0).transpose(0,2)
                 new_replace_embeds = torch.sum(replace_embeds[i] * mask, dim=-1)
+                new_replace_embeds = new_replace_embeds/len(np.nonzero(mask)) #是否用平均
                 past_key_values_total.append(new_replace_embeds.transpose(0,1))
             past_key_values_total = torch.stack(past_key_values_total, dim=0)
 
