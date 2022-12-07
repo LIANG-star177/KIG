@@ -36,7 +36,7 @@ def set_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='0', type=str, help='设置预测时使用的显卡,使用CPU设置成-1即可')
     parser.add_argument('--pretrained_model_path', default="log/checkpoint-41680", type=str, help='预训练的GPT2模型的路径')
-    parser.add_argument('--prompt_model_path', default='log/ca_prompt_saved_model/checkpoint-20840', type=str, help='模型输出路径')
+    parser.add_argument('--prompt_model_path', default='log/ca_multi_prompt_saved_model/checkpoint-6252', type=str, help='模型输出路径')
     parser.add_argument('--vocab_path', default='new_gpt/vocab.txt', type=str, help='词表，该词表为小词表，并增加了一些新的标记')
     parser.add_argument('--batch_size', default=1, type=int, help='生成标题的个数')
     parser.add_argument('--generate_max_len', default=300, type=int, help='生成标题的最大长度')
@@ -53,7 +53,7 @@ def set_args():
     parser.add_argument('--claim_map_path', default="data/claim_l2i_multi.json", type=str)
 
     # prompt参数
-    parser.add_argument("--multi_prompt", type=bool, default=False, help='是否多维prompt')
+    parser.add_argument("--multi_prompt", type=bool, default=True, help='是否多维prompt')
     parser.add_argument("--context_aware", type=bool, default=True, help='是否注意上下文')
     parser.add_argument("--use_lm_finetune", type=bool, default=False, help='是否finetune')
     parser.add_argument('--template_len', default=5, type=int, required=False,help='prompt长度')
@@ -278,7 +278,7 @@ def main():
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICE"] = args.device
     # 获取device信息，用于模型训练
-    device = torch.device("cuda:0" if torch.cuda.is_available() and int(args.device) >= 0 else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() and int(args.device) >= 0 else "cpu")
     args.device = device
     # 实例化tokenizer和model
     tokenizer = BertTokenizer.from_pretrained(args.vocab_path, do_lower_case=True)

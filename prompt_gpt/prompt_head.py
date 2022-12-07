@@ -162,6 +162,7 @@ class CaPromptHead(torch.nn.Module):
     def __init__(self, args, model, prompt_encoder, premodel=None):
         super().__init__()
         self.args = args
+        self.config = GPT2Config.from_pretrained(args.pretrained_model_path)
         self.spell_length = self.args.template_len
         self.model = model
         self.prompt_encoder = prompt_encoder
@@ -224,7 +225,27 @@ class CaPromptHead(torch.nn.Module):
         context_attn_mask = att_mask.clone()
         context_attn_mask[labels>0]=0
         context_encoding = self.model.transformer(input_ids, None, context_attn_mask)
-        past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
+        if self.args.multi_prompt:
+            replace_embeds = [[] for _ in range(batch_size)]
+            for i, prompt_enc in enumerate(self.prompt_encoder):
+                past_key_values_tmp, _ = prompt_enc(context_encoding[0], context_attn_mask)
+                for k in range(batch_size):
+                    replace_embeds[k].append(past_key_values_tmp[k])
+            past_key_values_total = []
+            for i in range(batch_size):
+                mask = claim_label2[i]
+                replace_embeds[i] = torch.stack(replace_embeds[i], dim=0).transpose(0,2)
+                new_replace_embeds = torch.sum(replace_embeds[i] * mask, dim=-1)
+                past_key_values_total.append(new_replace_embeds.transpose(0,1))
+            past_key_values_total = torch.stack(past_key_values_total, dim=0)
+
+            bsz, prompt_len = past_key_values_total.shape[0], past_key_values_total.shape[1]
+            past_key_values_total = past_key_values_total.view(bsz, prompt_len, self.config.n_layer * 2, self.config.n_head,
+                                                self.config.n_embd//self.config.n_head)
+            past_key_values_prompt = past_key_values_total.permute([2, 0, 3, 1, 4]).split(2)
+            
+        else:
+            past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
 
         prefix_attn = torch.ones(batch_size, self.spell_length).long().to(self.args.device)
         attention_mask = torch.cat((prefix_attn, att_mask), 1)

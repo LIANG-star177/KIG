@@ -7,6 +7,49 @@ import sys
 sys.path.append("new_gpt") 
 from model import GPT2LMHeadModel
 from transformers import BertTokenizer
+from masked_lstm import MaskableLSTM
+
+class PromptEncoderMLP(torch.nn.Module):
+    '''
+    A simple extension of Prefix-tuning, a conditional mlp
+    '''
+    def __init__(self, template_len, init_embedding, mid_dim, args):
+        super().__init__()
+        self.args = args
+        self.num_trigs = template_len
+        self.config = GPT2Config.from_pretrained(args.pretrained_model_path)
+        self.seq_indices = torch.arange(template_len).long()
+        self.embedding = torch.nn.Embedding(template_len, self.config.n_embd)
+        with torch.no_grad():
+            self.embedding.weight[:template_len,:] = init_embedding.weight[5:template_len+5,:].data
+        #self.embedding = nn.Embedding.from_pretrained(init_embedding.weight.data, freeze=False)
+        
+        self.control_trans = nn.Sequential(
+                nn.Linear(self.config.n_embd, mid_dim),
+                nn.Tanh(),
+                nn.Linear(mid_dim, self.config.n_layer * 2 * self.config.n_embd)
+        )
+        
+    def forward(self, context_hids, attn_mask):
+        device = self.embedding.weight.device
+        batch_size, ctx_len, _ = context_hids.size()
+        context_encoding = context_hids.mean(1) # mean pooling
+        context_encoding_expand = context_encoding[:,None,:].expand(-1, self.num_trigs, -1)
+        input_tokens = self.seq_indices.unsqueeze(0).expand(batch_size, -1).to(device)
+        input_embedding = self.embedding(input_tokens)
+        
+        past_key_values = self.control_trans(input_embedding+context_encoding_expand) #bsz, seqlen, layer*2*n_head*emb
+        past_key_values_tmp = past_key_values.clone()
+        bsz, prompt_len, _ = past_key_values.shape
+        past_key_values = past_key_values.view(bsz, prompt_len, self.config.n_layer * 2, self.config.n_head,
+                                               self.config.n_embd//self.config.n_head)
+        #past_key_values = self.dropout(past_key_values)
+        past_key_values = past_key_values.permute([2, 0, 3, 1, 4]).split(2)
+        # a list of num_layers tensors, with each of a size [2, batch_size, num_heads, seq_len, embed_size_per_head]
+        if self.args.multi_prompt:
+            return past_key_values_tmp, past_key_values
+        else:
+            return past_key_values
 
 class CaPromptEncoder(torch.nn.Module):
     '''
@@ -23,7 +66,7 @@ class CaPromptEncoder(torch.nn.Module):
         self.config.n_positions = template_len
         self.config.n_ctx = template_len
         self.config.n_head = 12
-        self.config.n_layer = 3
+        self.config.n_layer = 12
         self.config.add_cross_attention=True
         self.transformer = GPT2Model(self.config)
         self.transformer = self.transformer.to(self.args.device)
@@ -50,6 +93,7 @@ class Distill_Tuning(nn.Module):
         super(Distill_Tuning, self).__init__()   
         self.args = args
         self.spell_length = self.args.template_len
+        self.config = GPT2Config.from_pretrained(args.pretrained_model_path)
         self.model = GPT2LMHeadModel.from_pretrained(args.pretrained_model_path)
         self.tokenizer = BertTokenizer.from_pretrained(args.vocab_path, do_lower_case=True)
         
@@ -68,10 +112,10 @@ class Distill_Tuning(nn.Module):
         if self.args.multi_prompt:
             self.prompt_encoder = []
             for i in range(5):
-                self.prompt_encoder.append(CaPromptEncoder(self.spell_length, self.embeddings, args))
+                self.prompt_encoder.append(PromptEncoderMLP(self.spell_length, self.embeddings, 512, args))
             self.prompt_encoder = nn.ModuleList(self.prompt_encoder).to(self.args.device)
         else:
-            self.prompt_encoder = CaPromptEncoder(self.spell_length, self.embeddings, args)
+            self.prompt_encoder = PromptEncoderMLP(self.spell_length, self.embeddings, 512, args)
         # self.prompt_encoder = CaPromptEncoder(self.spell_length,  self.embeddings, self.args)
         print(f"number of additional parameters: {sum(p.numel() for p in self.prompt_encoder.parameters() if p.requires_grad)}")
         
@@ -132,12 +176,35 @@ class Distill_Tuning(nn.Module):
         context_attn_mask[labels>0]=0
         context_encoding = self.model.transformer(input_ids, None, context_attn_mask)
         if self.args.multi_prompt:
-            past_key_values_all = []
+            replace_embeds = [[] for _ in range(batch_size)]
             for i, prompt_enc in enumerate(self.prompt_encoder):
-                past_key_values_all.append(prompt_enc(context_encoding[0], context_attn_mask))
-            past_key_values_all = torch.stack(past_key_values_all, dim=0)
-            mask = claim_label2
-            past_key_values_prompt = torch.sum(past_key_values_all * mask, dim=-1)
+                past_key_values_tmp, _ = prompt_enc(context_encoding[0], context_attn_mask)
+                for k in range(batch_size):
+                    if batch_size!=1:
+                        replace_embeds[k].append(past_key_values_tmp[k])
+                    else:
+                        replace_embeds[k].append(past_key_values_tmp)
+            past_key_values_total = []
+            for i in range(batch_size):
+                mask = claim_label2[i]
+                replace_embeds[i] = torch.stack(replace_embeds[i], dim=0).transpose(0,2)
+                new_replace_embeds = torch.sum(replace_embeds[i] * mask, dim=-1) 
+                new_replace_embeds = new_replace_embeds/len(np.nonzero(mask))
+                past_key_values_total.append(new_replace_embeds.transpose(0,1))
+            past_key_values_total = torch.stack(past_key_values_total, dim=0)
+
+            bsz, prompt_len, _ = past_key_values_total.shape
+            past_key_values_total = past_key_values_total.view(bsz, prompt_len, self.config.n_layer * 2, self.config.n_head,
+                                                self.config.n_embd//self.config.n_head)
+            past_key_values_prompt = past_key_values_total.permute([2, 0, 3, 1, 4]).split(2)
+            
+            # past_key_values_all = []
+            # for i, prompt_enc in enumerate(self.prompt_encoder):
+            #     past_key_values_tmp, _ = prompt_enc(context_encoding[0], context_attn_mask)
+            #     past_key_values_all.append(past_key_values_tmp)
+            # past_key_values_all = torch.stack(past_key_values_all, dim=0)
+            # mask = claim_label2
+            # past_key_values_prompt = torch.sum(past_key_values_all * mask, dim=-1)
         else:
             past_key_values_prompt = self.prompt_encoder(context_encoding[0], context_attn_mask)
 
