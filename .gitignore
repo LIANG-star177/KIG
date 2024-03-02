@@ -2,3 +2,5 @@ data
 log
 runs
 vocab
+gpt_chinese
+model
